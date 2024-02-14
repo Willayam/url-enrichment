@@ -29,35 +29,36 @@ def log_function_time(func):
     return wrapper
 
 @log_function_time
-def fetch_subdomains(domain):
-    # Construct the URL for querying crt.sh
-    url = f"https://crt.sh/?q=%.{domain}&output=json"
+def fetch_subdomains(domain, retries=3, backoff_factor=1):
+    """
+    Fetches subdomains for a given domain with retries and exponential backoff in case of rate limiting.
 
-    # Send the request
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            # Parse the JSON response
-            json_data = response.json()
-            # Extract sub-domains
-            subdomains = set()
-            for entry in json_data:
-                # Extract the name_value field, which contains the domain names
-                name_value = entry.get('name_value')
-                if not name_value:
-                    continue
-                # Some entries might contain multiple names separated by '\n'
-                for name in name_value.split('\n'):
-                    # Basic validation to exclude wildcard entries and ensure it belongs to the domain
-                    if '*' not in name and domain in name:
-                        subdomains.add(name)
-            return list(subdomains)
-        else:
-            LOGGER.error(f"Failed to fetch data for {domain}. Status code: {response.status_code}")
-            return []
-    except Exception as e:
-        LOGGER.error(f"An error occurred: {e}")
-        return []
+    Args:
+        domain (str): The domain to fetch subdomains for.
+        retries (int): The number of retries to attempt in case of a rate limit (HTTP 429) or other recoverable errors.
+        backoff_factor (float): The factor by which to multiply the delay for each subsequent retry.
+
+    Returns:
+        list: A list of subdomains for the given domain.
+    """
+    url = f"https://crt.sh/?q=%.{domain}&output=json"
+    for attempt in range(retries):
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                json_data = response.json()
+                subdomains = {entry.get('name_value') for entry in json_data if entry.get('name_value')}
+                return list(subdomains)
+            elif response.status_code == 429:
+                sleep_time = backoff_factor * (2 ** attempt)
+                logging.info(f"Rate limit hit, retrying in {sleep_time} seconds for domain: {domain}")
+                time.sleep(sleep_time)
+            else:
+                logging.error(f"Failed to fetch data for {domain}. Status code: {response.status_code}")
+        except Exception as e:
+            logging.error(f"Exception occurred while fetching subdomains for {domain}: {e}")
+    logging.error(f"Max retries exceeded for domain {domain}")
+    return []
 
 @log_function_time
 def fetch_whois_info(domain):
@@ -129,7 +130,7 @@ def is_url_live(url):
 @log_function_time
 def parallel_fetch_subdomains(domains):
     subdomains_aggregated = {}
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_domain = {executor.submit(fetch_subdomains, domain): domain for domain in domains}
         
         for future in as_completed(future_to_domain):
@@ -149,7 +150,7 @@ def parallel_fetch_details_for_subdomains(subdomains_aggregated):
 
     # Dictionary to hold fetched details for each subdomain
     subdomain_details = {}
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=100) as executor:
         future_to_subdomain = {}
         for subdomain in all_subdomains:
             future_to_subdomain[executor.submit(fetch_whois_info, subdomain)] = (subdomain, 'whois')
@@ -174,7 +175,7 @@ def parallel_fetch_info(domains):
     # Dictionary to hold all fetched data
     domain_info = {}
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=100) as executor:
         # Initialize an empty dictionary to hold future tasks
         future_to_domain = {}
         
@@ -280,6 +281,11 @@ if st.button('Fetch Domain Information'):
                 whois_info = details.get('whois', {})
                 live_info = details.get('live', (False, 'N/A', 'No Redirect'))
 
+                # Check if 'expiry_date' is a datetime object and format it as a string
+                ssl_expiry_date = ssl_info.get("expiry_date", "N/A")
+                if isinstance(ssl_expiry_date, datetime):
+                    ssl_expiry_date = ssl_expiry_date.strftime("%Y-%m-%d %H:%M:%S")
+
                 # Construct the row for each subdomain
                 row = {
                     "Parent Domain": domain,
@@ -306,7 +312,7 @@ if st.button('Fetch Domain Information'):
         df_subdomains = pd.DataFrame(df_rows)
         st.dataframe(df_subdomains)
 
-        # Optional: Allow downloading of the DataFrame as CSV
+        # Download button
         csv = df_subdomains.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="Download data as CSV",
