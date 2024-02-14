@@ -1,5 +1,6 @@
 altair
 bs4
+dnspython
 numpy
 pandas
 pydeck
