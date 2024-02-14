@@ -1,5 +1,9 @@
 altair
+bs4
 numpy
 pandas
 pydeck
 streamlit
+dnspython
+python-whois
+requests
